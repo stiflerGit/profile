@@ -3,14 +3,17 @@
 package profile
 
 import (
+	"io"
 	"io/ioutil"
 	"log"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
 	"runtime/trace"
+	"strings"
 	"sync/atomic"
 )
 
@@ -23,6 +26,11 @@ const (
 	threadCreateMode
 	goroutineMode
 )
+
+type Uploader interface {
+	BaseURL() *url.URL
+	Upload(fileURL *url.URL, r io.Reader) error
+}
 
 // Profile represents an active profiling session.
 type Profile struct {
@@ -48,6 +56,9 @@ type Profile struct {
 
 	// stopped records if a call to profile.Stop has been made
 	stopped uint32
+
+	// TODO: document this
+	uploader Uploader
 }
 
 // NoShutdownHook controls whether the profiling package should
@@ -113,6 +124,13 @@ func ProfilePath(path string) func(*Profile) {
 	}
 }
 
+// TODO: document this
+func WithUploader(u Uploader) func(p *Profile) {
+	return func(p *Profile) {
+		p.uploader = u
+	}
+}
+
 // Stop stops the profile and flushes any unwritten data.
 func (p *Profile) Stop() {
 	if !atomic.CompareAndSwapUint32(&p.stopped, 0, 1) {
@@ -120,6 +138,16 @@ func (p *Profile) Stop() {
 		return
 	}
 	p.closer()
+
+	if uploader := p.uploader; uploader != nil {
+		infos, _ := ioutil.ReadDir(p.path)
+		for _, info := range infos {
+			if strings.HasSuffix(info.Name(), ".pprof") {
+				uploadFile(filepath.Join(p.path, info.Name()), p.uploader)
+			}
+		}
+	}
+
 	atomic.StoreUint32(&started, 0)
 }
 
@@ -281,4 +309,12 @@ func Start(options ...func(*Profile)) interface {
 	}
 
 	return &prof
+}
+
+func uploadFile(path string, uploader Uploader) {
+	f, _ := os.Open(path)
+	defer f.Close()
+	url := uploader.BaseURL()
+	url.Path = filepath.Join(url.Path, filepath.Base(f.Name()))
+	_ = uploader.Upload(url, f)
 }
